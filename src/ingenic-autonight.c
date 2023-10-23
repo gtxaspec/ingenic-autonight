@@ -3,6 +3,8 @@
 #include <string.h>
 #include <syslog.h>
 #include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 
 #define CONFIG_PATH "/etc/majestic.yaml"
 #define ISP_PATH "/proc/jz/isp/isp-m0"
@@ -82,6 +84,7 @@ int main(int argc, char *argv[]) {
     char *custom_command = NULL;
     int gpio2 = -1;
     int gpio3 = -1;
+    int daemonize = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--debug") == 0) {
@@ -109,10 +112,57 @@ int main(int argc, char *argv[]) {
             http_off = 1;
         } else if (strcmp(argv[i], "--custom-command") == 0 && i + 1 < argc) {
             custom_command = argv[++i];
+        } else if (strcmp(argv[i], "--daemon") == 0) {
+            daemonize = 1;
         } else {
-            printf("Usage: %s [--debug] [--gpio GPIO_NUM] [--gpio2 GPIO2_NUM] [--gpio3 GPIO3_NUM] [--threshold VALUE] [--poll-only] [--polling-delay SECONDS] [--http-off] [--custom-command \"COMMAND\"]\n", argv[0]);
+            printf("Usage: %s [--debug] [--gpio GPIO_NUM] [--gpio2 GPIO_NUM2] [--gpio3 GPIO_NUM3] [--threshold VALUE] [--poll-only] [--polling-delay SECONDS] [--http-off] [--custom-command \"COMMAND\"] [--daemon]\n", argv[0]);
             return 1;
         }
+    }
+
+    if (daemonize) {
+        pid_t pid, sid;
+
+        // Fork off the parent process
+        pid = fork();
+        if (pid < 0) {
+            syslog(LOG_ERR, "Failed to fork daemon");
+            exit(EXIT_FAILURE);
+        }
+
+        // If we got a good PID, then we can exit the parent process.
+        if (pid > 0) {
+            exit(EXIT_SUCCESS);
+        }
+
+        // Change the file mode mask
+        umask(0);
+
+        // Open logs here
+        openlog("majestic-autonight", LOG_PID, LOG_DAEMON);
+
+        // Create a new SID for the child process
+        sid = setsid();
+        if (sid < 0) {
+            // Log any failure and exit
+            syslog(LOG_ERR, "Failed to create a new SID");
+            exit(EXIT_FAILURE);
+        }
+
+        // Change the current working directory
+        if ((chdir("/")) < 0) {
+            // Log any failure and exit
+            syslog(LOG_ERR, "Failed to change directory");
+            exit(EXIT_FAILURE);
+        }
+
+        // Close standard file descriptors
+        close(STDIN_FILENO);
+        close(STDOUT_FILENO);
+        close(STDERR_FILENO);
+    } else {
+        // Open logs here
+        openlog("majestic-autonight", LOG_PID, LOG_USER);
     }
 
     if (!poll_only) {
@@ -121,12 +171,22 @@ int main(int argc, char *argv[]) {
         }
 
         if (backlight_pin == -1) {
+            syslog(LOG_ERR, "Failed to extract backlight pin");
             if (debug_mode) {
                 printf("Failed to extract backlight pin\n");
             }
-            syslog(LOG_ERR, "Failed to extract backlight pin");
-            return 1;
+            exit(EXIT_FAILURE);
         }
+
+        syslog(LOG_INFO, "Polling Delay: %d", polling_delay);
+        syslog(LOG_INFO, "Backlight GPIO pin: %d", backlight_pin);
+        if (gpio2 != -1) {
+            syslog(LOG_INFO, "Additional GPIO 2: %d", gpio2);
+        }
+        if (gpio3 != -1) {
+            syslog(LOG_INFO, "Additional GPIO 3: %d", gpio3);
+        }
+        syslog(LOG_INFO, "ISP threshold: %d", threshold);
 
         if (debug_mode) {
             printf("Polling Delay: %d\n", polling_delay);
@@ -139,15 +199,6 @@ int main(int argc, char *argv[]) {
             }
             printf("ISP threshold: %d\n", threshold);
         }
-        syslog(LOG_INFO, "Polling Delay: %d", polling_delay);
-        syslog(LOG_INFO, "Backlight GPIO pin: %d", backlight_pin);
-        if (gpio2 != -1) {
-            syslog(LOG_INFO, "Additional GPIO 2: %d", gpio2);
-        }
-        if (gpio3 != -1) {
-            syslog(LOG_INFO, "Additional GPIO 3: %d", gpio3);
-        }
-        syslog(LOG_INFO, "ISP threshold: %d", threshold);
     }
 
     int last_gpio_value = -1;
@@ -160,7 +211,7 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        if (debug_mode || poll_only) {
+        if (debug_mode) {
             printf("Polled ISP value: %d\n", isp_value);
         }
 
@@ -202,5 +253,6 @@ int main(int argc, char *argv[]) {
         sleep(polling_delay);
     }
 
+    closelog();
     return 0;
 }
