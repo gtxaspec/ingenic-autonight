@@ -5,23 +5,36 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <signal.h>
 
 #define CONFIG_PATH "/etc/majestic.yaml"
 #define ISP_PATH "/proc/jz/isp/isp-m0"
 #define DEFAULT_THRESHOLD 50
+#define LINE_SIZE 256
+#define COMMAND_SIZE 256
+#define GPIO_PATH_SIZE 64
+
+volatile sig_atomic_t terminate = 0;
+
+void signal_handler(int signum) {
+    if (signum == SIGTERM || signum == SIGINT) {
+        terminate = 1;
+    }
+}
 
 // Extract backlight GPIO pin from the configuration file
 int get_backlight_pin() {
     FILE *config_file = fopen(CONFIG_PATH, "r");
     if (!config_file) {
+        syslog(LOG_ERR, "Error opening config file");
         return -1;
     }
 
-    char line[256];
+    char line[LINE_SIZE];
     while (fgets(line, sizeof(line), config_file)) {
         if (strstr(line, "  backlightPin:") != NULL) {
             int pin;
-            if (sscanf(line, "  backlightPin: %2d", &pin) == 1) {
+            if (sscanf(line, "  backlightPin: %d", &pin) == 1) {
                 fclose(config_file);
                 return pin;
             }
@@ -36,16 +49,18 @@ int get_backlight_pin() {
 int get_isp_value() {
     FILE *isp_file = fopen(ISP_PATH, "r");
     if (!isp_file) {
+        syslog(LOG_ERR, "Error opening ISP file");
         return -1;
     }
 
-    char line[256];
+    char line[LINE_SIZE];
     while (fgets(line, sizeof(line), isp_file)) {
         if (strstr(line, "SENSOR analog gain :") != NULL) {
             int value;
-            sscanf(line, "SENSOR analog gain : %d", &value);
-            fclose(isp_file);
-            return value;
+            if (sscanf(line, "SENSOR analog gain : %d", &value) == 1) {
+                fclose(isp_file);
+                return value;
+            }
         }
     }
 
@@ -55,11 +70,12 @@ int get_isp_value() {
 
 // Set the GPIO pin value
 void set_gpio_value(int pin, int value) {
-    char gpio_path[64];
+    char gpio_path[GPIO_PATH_SIZE];
     snprintf(gpio_path, sizeof(gpio_path), "/sys/class/gpio/gpio%d/value", pin);
 
     FILE *gpio_file = fopen(gpio_path, "w");
     if (!gpio_file) {
+        syslog(LOG_ERR, "Error opening GPIO file");
         return;
     }
 
@@ -69,12 +85,16 @@ void set_gpio_value(int pin, int value) {
 
 // Send an HTTP GET request using the curl utility
 void send_http_request(const char *url) {
-    char command[256];
+    char command[COMMAND_SIZE];
     snprintf(command, sizeof(command), "curl -s \"%s\" > /dev/null", url);
     system(command);
 }
 
 int main(int argc, char *argv[]) {
+    // Setup signal handlers
+    signal(SIGTERM, signal_handler);
+    signal(SIGINT, signal_handler);
+
     int debug_mode = 0;
     int threshold = DEFAULT_THRESHOLD;
     int backlight_pin = -1;
@@ -203,7 +223,7 @@ int main(int argc, char *argv[]) {
 
     int last_gpio_value = -1;
 
-    while (1) {
+    while (!terminate) {
         int isp_value = get_isp_value();
         if (isp_value == -1) {
             syslog(LOG_ERR, "Failed to read ISP value");
