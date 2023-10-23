@@ -6,6 +6,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <signal.h>
+#include <errno.h>
 
 #define CONFIG_PATH "/etc/majestic.yaml"
 #define ISP_PATH "/proc/jz/isp/isp-m0"
@@ -13,6 +14,7 @@
 #define LINE_SIZE 256
 #define COMMAND_SIZE 256
 #define GPIO_PATH_SIZE 64
+#define PID_FILE "/var/run/ingenic-autonight.pid"
 
 volatile sig_atomic_t terminate = 0;
 
@@ -20,6 +22,44 @@ void signal_handler(int signum) {
     if (signum == SIGTERM || signum == SIGINT) {
         terminate = 1;
     }
+}
+
+int create_pid_file() {
+    FILE *f = fopen(PID_FILE, "w");
+    if (!f) {
+        syslog(LOG_ERR, "Failed to create PID file %s: %s", PID_FILE, strerror(errno));
+        return -1;
+    }
+    fprintf(f, "%d", getpid());
+    fclose(f);
+    return 0;
+}
+
+int check_pid_file() {
+    FILE *f = fopen(PID_FILE, "r");
+    if (f) {
+        int pid;
+        char cmdline[256];
+        if (fscanf(f, "%d", &pid) == 1) {
+            fclose(f);
+            snprintf(cmdline, sizeof(cmdline), "/proc/%d/cmdline", pid);
+            f = fopen(cmdline, "r");
+            if (f) {
+                if (fgets(cmdline, sizeof(cmdline), f) && strstr(cmdline, "ingenic-autonight")) {
+                    fclose(f);
+                    return 1;  // Another instance is running
+                }
+                fclose(f);
+            }
+        } else {
+            fclose(f);
+        }
+    }
+    return 0;
+}
+
+void remove_pid_file() {
+    unlink(PID_FILE);
 }
 
 // Extract backlight GPIO pin from the configuration file
@@ -40,7 +80,6 @@ int get_backlight_pin() {
             }
         }
     }
-
     fclose(config_file);
     return -1;
 }
@@ -63,7 +102,6 @@ int get_isp_value() {
             }
         }
     }
-
     fclose(isp_file);
     return -1;
 }
@@ -95,6 +133,22 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM, signal_handler);
     signal(SIGINT, signal_handler);
 
+    // Check and create PID file
+    if (check_pid_file()) {
+        syslog(LOG_ERR, "Another instance of ingenic-autonight is already running.");
+        printf("Another instance of ingenic-autonight is already running.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    if (create_pid_file() == -1) {
+        syslog(LOG_ERR, "Failed to create PID file.");
+        printf("Failed to create PID file.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    atexit(remove_pid_file);
+
+    // Parse command line arguments
     int debug_mode = 0;
     int threshold = DEFAULT_THRESHOLD;
     int backlight_pin = -1;
@@ -176,6 +230,8 @@ int main(int argc, char *argv[]) {
             exit(EXIT_FAILURE);
         }
 
+        create_pid_file(); // Create PID file after changing directory
+
         // Close standard file descriptors
         close(STDIN_FILENO);
         close(STDOUT_FILENO);
@@ -197,7 +253,6 @@ int main(int argc, char *argv[]) {
             }
             exit(EXIT_FAILURE);
         }
-
         syslog(LOG_INFO, "Polling Delay: %d", polling_delay);
         syslog(LOG_INFO, "Backlight GPIO pin: %d", backlight_pin);
         if (gpio2 != -1) {
@@ -231,7 +286,7 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        if (debug_mode) {
+        if (debug_mode || poll_only) {
             printf("Polled ISP value: %d\n", isp_value);
         }
 
