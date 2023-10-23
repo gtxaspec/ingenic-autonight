@@ -78,12 +78,20 @@ int main(int argc, char *argv[]) {
     int backlight_pin = -1;
     int poll_only = 0;
     int polling_delay = 2;  // Default polling delay
+    int http_off = 0;
+    char *custom_command = NULL;
+    int gpio2 = -1;
+    int gpio3 = -1;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--debug") == 0) {
             debug_mode = 1;
         } else if (strcmp(argv[i], "--gpio") == 0 && i + 1 < argc) {
             backlight_pin = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--gpio2") == 0 && i + 1 < argc) {
+            gpio2 = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--gpio3") == 0 && i + 1 < argc) {
+            gpio3 = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--threshold") == 0 && i + 1 < argc) {
             threshold = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--poll-only") == 0) {
@@ -97,8 +105,12 @@ int main(int argc, char *argv[]) {
                     printf("Invalid polling delay provided. Using default value of 2 seconds.\n");
                 }
             }
+        } else if (strcmp(argv[i], "--http-off") == 0) {
+            http_off = 1;
+        } else if (strcmp(argv[i], "--custom-command") == 0 && i + 1 < argc) {
+            custom_command = argv[++i];
         } else {
-            printf("Usage: %s [--debug] [--gpio GPIO_NUM] [--threshold VALUE] [--poll-only] [--polling-delay SECONDS]\n", argv[0]);
+            printf("Usage: %s [--debug] [--gpio GPIO_NUM] [--gpio2 GPIO2_NUM] [--gpio3 GPIO3_NUM] [--threshold VALUE] [--poll-only] [--polling-delay SECONDS] [--http-off] [--custom-command \"COMMAND\"]\n", argv[0]);
             return 1;
         }
     }
@@ -119,10 +131,22 @@ int main(int argc, char *argv[]) {
         if (debug_mode) {
             printf("Polling Delay: %d\n", polling_delay);
             printf("Backlight GPIO pin: %d\n", backlight_pin);
+            if (gpio2 != -1) {
+                printf("Additional GPIO 2: %d\n", gpio2);
+            }
+            if (gpio3 != -1) {
+                printf("Additional GPIO 3: %d\n", gpio3);
+            }
             printf("ISP threshold: %d\n", threshold);
         }
         syslog(LOG_INFO, "Polling Delay: %d", polling_delay);
         syslog(LOG_INFO, "Backlight GPIO pin: %d", backlight_pin);
+        if (gpio2 != -1) {
+            syslog(LOG_INFO, "Additional GPIO 2: %d", gpio2);
+        }
+        if (gpio3 != -1) {
+            syslog(LOG_INFO, "Additional GPIO 3: %d", gpio3);
+        }
         syslog(LOG_INFO, "ISP threshold: %d", threshold);
     }
 
@@ -150,18 +174,32 @@ int main(int argc, char *argv[]) {
 
         if (new_gpio_value != last_gpio_value) {
             set_gpio_value(backlight_pin, new_gpio_value);
+            if (gpio2 != -1) {
+                set_gpio_value(gpio2, new_gpio_value);
+            }
+            if (gpio3 != -1) {
+                set_gpio_value(gpio3, new_gpio_value);
+            }
+
             if (new_gpio_value) {
                 syslog(LOG_INFO, "Night mode enabled");
-                send_http_request("http://localhost/night/on");
+                if (!http_off) {
+                    send_http_request("http://localhost/night/on");
+                }
+                if (custom_command) {
+                    system(custom_command);
+                    syslog(LOG_INFO, "Custom command executed: %s", custom_command);
+                }
             } else {
                 syslog(LOG_INFO, "Night mode disabled");
-                send_http_request("http://localhost/night/off");
+                if (!http_off) {
+                    send_http_request("http://localhost/night/off");
+                }
             }
             last_gpio_value = new_gpio_value;
         }
 
-        sleep(polling_delay);  // Use the custom polling delay
-
+        sleep(polling_delay);
     }
 
     return 0;
